@@ -1,0 +1,638 @@
+<!DOCTYPE HTML>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <title>Multi-Stage Planetary Gear Simulator</title>
+    <meta charset="utf-8">
+    <style>
+        body { font-family: sans-serif; background-color: #ffffff; color: #000; margin: 0; padding: 20px; }
+        /* Exaktes Styling der Inputs aus dem Original */
+        input[type=range] { vertical-align: middle; width: 400px; margin-left: 20px; }
+        input[type=number] { width: 70px; margin-left: 10px; }
+        label { font-weight: bold; display: inline-block; width: 140px; text-align: right; margin-right: 10px;}
+        select { padding: 5px; font-size: 14px; }
+        
+        .stage-container {
+            border: 1px solid #ccc;
+            padding: 15px;
+            margin-bottom: 30px;
+            border-radius: 8px;
+            background: #fdfdfd;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        
+        .coupling-container {
+            background: #eef;
+            border: 1px dashed #88a;
+            padding: 10px;
+            margin: -15px auto 15px auto;
+            width: 80%;
+            text-align: center;
+            border-radius: 5px;
+            font-weight: bold;
+            color: #446;
+        }
+
+        .controls-block {
+            display: inline-block; 
+            vertical-align: top; 
+            padding-left: 20px;
+            text-align: left;
+        }
+
+        h2 { margin-top: 0; color: #555; text-align: left; border-bottom: 2px solid #ddd; padding-bottom: 5px;}
+    </style>
+
+    <script type="text/javascript">
+      /* * CORE ANIMATION LOOP 
+       */
+      function Animation() {
+        this.stages = [];
+        this.lastTime = 0;
+        this.running = false;
+      }
+      
+      Animation.prototype.addStage = function(stageObj) {
+        this.stages.push(stageObj);
+      }
+
+      Animation.prototype.start = function() {
+        this.running = true;
+        var _this = this;
+        window.requestAnimationFrame(function(time) { _this.loop(time); });
+      };
+
+      Animation.prototype.loop = function(time) {
+        if (!this.running) return;
+        if (this.lastTime === 0) this.lastTime = time;
+        var dt = Math.min(time - this.lastTime, 100); // Limit delta time
+        this.lastTime = time;
+
+        // Update all stages
+        for(var i=0; i<this.stages.length; i++) {
+            this.stages[i].update(dt);
+        }
+
+        var _this = this;
+        window.requestAnimationFrame(function(time) { _this.loop(time); });
+      };
+
+      /* * MATH & GEOMETRY HELPERS 
+       */
+      var pi = Math.PI;
+      var mm_per_tooth = 2*2*pi;
+      var pressure_angle_deg = 20;
+      var pressure_angle = pressure_angle_deg * pi / 180;
+      var clearance = 2;
+      var backlash = 2;
+      var axle_radius = 20;
+      var ring_margin = 20;
+
+      function polar(r,theta) { return [r*Math.sin(theta), r*Math.cos(theta)]; }
+      function iang(r1,r2) { return Math.sqrt((r2/r1)*(r2/r1) - 1) - Math.acos(r1/r2); }
+      function q6(b,s,t,d) { return polar(d,s*(iang(b,d)+t)); }
+      function q7(f,r,b,r2,t,s) { return q6(b,s,t,(1-f)*Math.max(b,r)+f*r2); }
+      
+      function rotate(points_array, angle) {
+          var answer = [];
+          var ca = Math.cos(angle), sa = Math.sin(angle);
+          for(var i=0; i<points_array.length; i++) {
+              var x=points_array[i][0], y=points_array[i][1];
+              answer.push([x*ca - y*sa, y*ca + x*sa]);
+          }
+          return answer;
+      }
+
+      function build_gear(number_of_teeth) {
+          var p = mm_per_tooth * number_of_teeth / pi / 2;
+          var c = p + mm_per_tooth / pi - clearance;
+          var b = p * Math.cos(pressure_angle);
+          var r = p-(c-p)-clearance;
+          var t = mm_per_tooth / 2 - backlash / 2;
+          var k = -iang(b, p) - t/2/p;
+
+          var points=[ polar(r, -pi/number_of_teeth), polar(r, r<b ? k : -pi/number_of_teeth),
+                   q7(0/5,r,b,c,k, 1), q7(1/5,r,b,c,k, 1), q7(2/5,r,b,c,k, 1), q7(3/5,r,b,c,k, 1), q7(4/5,r,b,c,k, 1), q7(5/5,r,b,c,k, 1),
+                   q7(5/5,r,b,c,k,-1), q7(4/5,r,b,c,k,-1), q7(3/5,r,b,c,k,-1), q7(2/5,r,b,c,k,-1), q7(1/5,r,b,c,k,-1), q7(0/5,r,b,c,k,-1),
+                   polar(r, r<b ? -k : pi/number_of_teeth), polar(r, pi/number_of_teeth) ];
+
+          var answer = [];
+          for (var i=0; i<number_of_teeth; i++ ) answer = answer.concat(rotate(points, -i*2*pi/number_of_teeth));
+          return answer;
+      }
+
+      function make_gear_svg(number_of_teeth, internal, color) {
+          var group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+          group.setAttribute("stroke", "#000000");
+          group.setAttribute("stroke-width", "2px");
+
+          var gearPoly = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+          gearPoly.setAttribute("points", build_gear(number_of_teeth).toString());
+          
+          var axle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+          var p_rad = mm_per_tooth * number_of_teeth / pi / 2;
+          var mark_rad = 0;
+
+          if (internal) {
+            axle.setAttribute("r", p_rad + ring_margin);
+            mark_rad = p_rad + ring_margin / 2;
+            gearPoly.setAttribute("fill", "#ffffff");
+            axle.setAttribute("fill", color);
+            group.appendChild(axle);
+            group.appendChild(gearPoly);
+          } else {
+            axle.setAttribute("r", Math.max(1, Math.min(axle_radius, p_rad - 20)));
+            mark_rad = p_rad - 10;
+            axle.setAttribute("fill", "#ffffff");
+            gearPoly.setAttribute("fill", color);
+            group.appendChild(gearPoly);
+            group.appendChild(axle);
+          }
+
+          var mark = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+          mark.setAttribute("r", 2);
+          mark.setAttribute("fill", "#000000");
+          mark.setAttribute("transform", "rotate(90) translate(" + mark_rad + ")");
+          group.appendChild(mark);
+
+          // Helper to update geometry later
+          group.changeTeeth = function(new_teeth) {
+             gearPoly.setAttribute("points", build_gear(new_teeth).toString());
+             var new_p = mm_per_tooth * new_teeth / pi / 2;
+             if(internal) {
+                 axle.setAttribute("r", new_p + ring_margin);
+                 mark.setAttribute("transform", "rotate(90) translate(" + (new_p + ring_margin/2) + ")");
+             } else {
+                 axle.setAttribute("r", Math.max(1, Math.min(axle_radius, new_p - 20)));
+                 mark.setAttribute("transform", "rotate(90) translate(" + (new_p - 10) + ")");
+             }
+          };
+          return group;
+      }
+
+      function makeCarrierPath(points, radius) {
+        radius *= points.length / 1.923;
+        if(points.length === 0) return "";
+        var spec = "M" + points[0][0] + "," + points[0][1];
+        for (var i = 1; i <= points.length; ++i) {
+           var p = points[i % points.length];
+           spec += " A" + radius + "," + radius + " 0 0 1 " + p[0] + "," + p[1];
+        }
+        return spec;
+      }
+
+      /*
+       * STAGE CLASS: Handles one complete Planetary Gear Set
+       */
+      function GearStage(id, container, previousStage) {
+        this.id = id;
+        this.container = container;
+        this.prev = previousStage;
+        
+        // Defaults
+        this.S = 36; this.P = 18; this.R = 72;
+        this.numPlanets = 4;
+        
+        this.angles = { sun: 0, carrier: 0, ring: 0 };
+        this.speeds = { sun: 4, carrier: 1, ring: -1 }; // Default speeds
+        
+        // Mode: which part is calculated?
+        this.mode = (id === 0) ? 'carrier' : 'driven'; 
+        
+        // If not the first stage, we need coupling config
+        // Default: Prev Carrier drives This Sun
+        this.coupling = { 
+            inputSource: 'carrier', // from prev stage (sun, carrier, ring)
+            inputTarget: 'sun',     // to this stage (sun, carrier, ring)
+            fixedElement: 'ring'    // which element is fixed/controllable in this stage?
+        };
+
+        this.initUI();
+        this.initGraphics();
+        this.recalcGeometry();
+        this.updateSpeedDisplay();
+      }
+
+      GearStage.prototype.initUI = function() {
+        var html = `
+          <div style="display: inline-block;">
+             <div id="svg_container_${this.id}"></div>
+          </div>
+          <div class="controls-block">
+             <h2>Stage ${this.id + 1}</h2>
+             
+             ${this.id === 0 ? `
+             <p><label>Solve for:</label> 
+             <select id="mode_${this.id}">
+               <option value="sun">Sun Gear</option>
+               <option value="carrier" selected>Planets and Carrier</option>
+               <option value="ring">Ring Gear</option>
+             </select></p>` : `
+             <p style="color:#666; font-size:0.9em;">Input: <b>Stage ${this.id}</b> &rarr; <b>Stage ${this.id + 1}</b></p>
+             `}
+
+             <p><input type="range" id="numPlanets_${this.id}" min="1" max="5" step="1" value="4">
+             <input type="number" id="numPlanetsOut_${this.id}" readonly>
+             <label style="color: #ff00ff">Planets</label></p>
+
+             <br/>
+             <p><input type="range" id="sunTeeth_${this.id}" min="4" max="50" step="1" value="36">
+             <input type="number" id="sunTeethOut_${this.id}" readonly>
+             <label style="color: #00bbbb">Sun Teeth</label></p>
+
+             <p><input type="range" id="planetTeeth_${this.id}" min="4" max="50" step="1" value="18">
+             <input type="number" id="planetTeethOut_${this.id}" readonly>
+             <label style="color: #ff00ff">Planet Teeth</label></p>
+
+             <p><input type="range" id="ringTeeth_${this.id}" min="12" max="150" step="1" value="72">
+             <input type="number" id="ringTeethOut_${this.id}" readonly>
+             <label style="color: #00d800">Ring Teeth</label></p>
+
+             <br/>
+             <p><input type="range" id="sunSpeed_${this.id}" min="-20" max="20" step="0.1" value="4">
+             <input type="number" id="sunSpeedOut_${this.id}" readonly>
+             <label style="color: #00bbbb">Sun Speed</label></p>
+
+             <p><input type="range" id="carrierSpeed_${this.id}" min="-20" max="20" step="0.1" value="1">
+             <input type="number" id="carrierSpeedOut_${this.id}" readonly>
+             <label style="color: #ee3333">Carrier Speed</label></p>
+
+             <p><input type="range" id="ringSpeed_${this.id}" min="-20" max="20" step="0.1" value="-1">
+             <input type="number" id="ringSpeedOut_${this.id}" readonly>
+             <label style="color: #00d800">Ring Speed</label></p>
+          </div>
+        `;
+        
+        // Add Coupling Control ABOVE this stage if it's not the first
+        if (this.id > 0) {
+            var coupleHTML = `
+            <div class="coupling-container">
+               Connect Stage ${this.id} 
+               <select id="coupleSrc_${this.id}">
+                 <option value="sun">Sun</option>
+                 <option value="carrier" selected>Carrier</option>
+                 <option value="ring">Ring</option>
+               </select>
+               &rarr; Stage ${this.id + 1}
+               <select id="coupleTgt_${this.id}">
+                 <option value="sun" selected>Sun</option>
+                 <option value="carrier">Carrier</option>
+                 <option value="ring">Ring</option>
+               </select>
+            </div>
+            `;
+            this.container.innerHTML = coupleHTML + html;
+        } else {
+            this.container.innerHTML = html;
+        }
+
+        // Bind Events
+        var self = this;
+        var ids = ['sunTeeth', 'planetTeeth', 'ringTeeth', 'numPlanets', 'sunSpeed', 'carrierSpeed', 'ringSpeed'];
+        ids.forEach(function(key){
+            var el = document.getElementById(key + "_" + self.id);
+            el.oninput = function() { self.handleInput(key, this.value); };
+        });
+
+        if (this.id === 0) {
+            document.getElementById('mode_0').onchange = function() { 
+                self.mode = this.value; 
+                self.recalcSpeeds(); 
+            };
+        } else {
+            // Coupling events
+            document.getElementById('coupleSrc_' + self.id).onchange = function() { 
+                self.coupling.inputSource = this.value; 
+                // Force global recalc
+                window.gearSystem.recalcAllSpeeds();
+            };
+            document.getElementById('coupleTgt_' + self.id).onchange = function() { 
+                self.coupling.inputTarget = this.value; 
+                window.gearSystem.recalcAllSpeeds();
+            };
+        }
+      };
+
+      GearStage.prototype.initGraphics = function() {
+          var svgH = 400, svgW = 400;
+          var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+          svg.setAttribute("height", svgH);
+          svg.setAttribute("width", svgW);
+          svg.setAttribute("viewBox", -svgW/2 + " " + -svgH/2 + " " + svgW + " " + svgH);
+          svg.setAttribute("preserveAspectRatio", "xMidYMid slice");
+          
+          this.gfx = {
+              sun: make_gear_svg(this.S, false, "#44dddd"),
+              ring: make_gear_svg(this.R, true, "#88ff88"),
+              carrier: document.createElementNS("http://www.w3.org/2000/svg", "path"),
+              planets: [],
+              defs: document.createElementNS("http://www.w3.org/2000/svg", "defs"),
+              planetTemplate: make_gear_svg(this.P, false, "#ff00ff88")
+          };
+
+          this.gfx.planetTemplate.setAttribute("id", "planet_" + this.id);
+          this.gfx.defs.appendChild(this.gfx.planetTemplate);
+          
+          this.gfx.carrier.setAttribute("stroke", "#888888");
+          this.gfx.carrier.setAttribute("stroke-width", "2px");
+          this.gfx.carrier.setAttribute("fill", "#ff8888");
+
+          svg.appendChild(this.gfx.defs);
+          svg.appendChild(this.gfx.ring);
+          svg.appendChild(this.gfx.carrier);
+          svg.appendChild(this.gfx.sun);
+          
+          document.getElementById("svg_container_" + this.id).appendChild(svg);
+          this.svgElement = svg;
+      };
+
+      GearStage.prototype.handleInput = function(key, val) {
+          val = parseFloat(val);
+          if (key === 'numPlanets') this.numPlanets = parseInt(val);
+          if (key === 'sunTeeth') this.S = parseInt(val);
+          if (key === 'planetTeeth') this.P = parseInt(val);
+          if (key === 'ringTeeth') this.R = parseInt(val);
+          
+          if (key.includes('Speed')) {
+              // Update local speeds, logic depends on mode
+              if (key === 'sunSpeed') this.speeds.sun = val;
+              if (key === 'carrierSpeed') this.speeds.carrier = val;
+              if (key === 'ringSpeed') this.speeds.ring = val;
+              
+              if (this.id > 0) {
+                  // If driven stage, changing a speed slider sets the "other" non-driven element
+                  // But we need to know which one is the free one. 
+                  // For simplicity: If driven is Sun, and user moves Ring, Ring is the free input.
+              }
+              window.gearSystem.recalcAllSpeeds();
+              return; // Calc geometry handled in recalcAllSpeeds if needed, but mainly speed
+          }
+
+          // Geometry Logic (Constraints)
+          if (key === 'sunTeeth' || key === 'planetTeeth' || key === 'ringTeeth') {
+             // Logic from original: Solve for the third if two change
+             // Simplified: S + 2P = R. 
+             // Determine which one is the "result" based on mode or just hierarchy
+             // Original logic:
+             // Sun mode: S = R - 2P
+             // Carrier mode: P = (R-S)/2
+             // Ring mode: R = S + 2P
+             
+             // We stick to 'Carrier' logic (calculate P) as default for better UX unless specifically resolving others
+             // But let's try to adapt the original's flexible logic:
+             var mode = (this.id === 0) ? this.mode : 'carrier'; // Default geometry solve
+             
+             if (mode === 'sun' || key === 'ringTeeth' && key === 'planetTeeth') {
+                 this.S = Math.max(4, this.R - 2 * this.P);
+             } else if (mode === 'ring') {
+                 this.R = this.S + 2 * this.P;
+             } else {
+                 // Carrier/Planet solve
+                 this.P = Math.max(4, Math.floor((this.R - this.S) / 2));
+                 // Adjust R to fit exactly if floor happened
+                 this.R = this.S + 2 * this.P; 
+             }
+          }
+          
+          this.recalcGeometry();
+          window.gearSystem.recalcAllSpeeds();
+      };
+
+      GearStage.prototype.recalcGeometry = function() {
+          // Update Sliders to reflect reality
+          document.getElementById('sunTeeth_' + this.id).value = this.S;
+          document.getElementById('planetTeeth_' + this.id).value = this.P;
+          document.getElementById('ringTeeth_' + this.id).value = this.R;
+          document.getElementById('numPlanets_' + this.id).value = this.numPlanets;
+
+          // Update Outputs
+          document.getElementById('sunTeethOut_' + this.id).value = this.S;
+          document.getElementById('planetTeethOut_' + this.id).value = this.P;
+          document.getElementById('ringTeethOut_' + this.id).value = this.R;
+          document.getElementById('numPlanetsOut_' + this.id).value = this.numPlanets;
+
+          // Update SVGs
+          this.gfx.sun.changeTeeth(this.S);
+          this.gfx.ring.changeTeeth(this.R);
+          this.gfx.planetTemplate.changeTeeth(this.P);
+
+          // Update Planet instances
+          while(this.gfx.planets.length < this.numPlanets) {
+              var p = document.createElementNS("http://www.w3.org/2000/svg", "use");
+              p.setAttributeNS("http://www.w3.org/1999/xlink", "href", "#planet_" + this.id);
+              this.svgElement.appendChild(p);
+              this.gfx.planets.push(p);
+          }
+          while(this.gfx.planets.length > this.numPlanets) {
+              this.svgElement.removeChild(this.gfx.planets.pop());
+          }
+      };
+
+      GearStage.prototype.recalcSpeeds = function() {
+          var S = this.S, R = this.R;
+          var ws = this.speeds.sun;
+          var wc = this.speeds.carrier;
+          var wr = this.speeds.ring;
+          
+          // Formula: (R+S)*wc = R*wr + S*ws
+          
+          if (this.id === 0) {
+              // Stage 1: Standard Solver
+              if (this.mode === 'sun') {
+                  // ws = ((R+S)*wc - R*wr) / S
+                  this.speeds.sun = ((R+S)*wc - R*wr) / S;
+              } else if (this.mode === 'ring') {
+                  // wr = ((R+S)*wc - S*ws) / R
+                  this.speeds.ring = ((R+S)*wc - S*ws) / R;
+              } else {
+                  // wc = (R*wr + S*ws) / (R+S)
+                  this.speeds.carrier = (R*wr + S*ws) / (R+S);
+              }
+          } else {
+              // Driven Stage logic
+              // Input comes from Previous Stage
+              var inputVal = this.prev.speeds[this.coupling.inputSource];
+              
+              // Apply input
+              this.speeds[this.coupling.inputTarget] = inputVal;
+              
+              // We need to know which of the remaining two is the "fixed/slider" and which is "output/calc"
+              // Strategy: The element chosen as Input is locked.
+              // Of the other two, checking which slider the user touched is hard here.
+              // Simplification: 
+              // 1. Input is locked to Prev.
+              // 2. Ring is assumed fixed (0) or manually set, Sun is fixed or manually set.
+              // 3. Calculate the remaining.
+              
+              // Standard Planetary Reducer: Sun=Input, Ring=Fixed(or set), Carrier=Output
+              // Differential: Sun=Input1, Ring=Input2, Carrier=Output
+              
+              // We simulate "Carrier Solved" unless Carrier is the Input.
+              
+              if (this.coupling.inputTarget !== 'carrier') {
+                  // Calculate Carrier based on Sun and Ring
+                  this.speeds.carrier = (R*this.speeds.ring + S*this.speeds.sun) / (R+S);
+              } else {
+                  // Carrier is Input. We need to decide what to solve for.
+                  // Let's solve for Sun (assuming Ring is the manual/fixed control)
+                  // ws = ((R+S)*wc - R*wr) / S
+                  this.speeds.sun = ((R+S)*this.speeds.carrier - R*this.speeds.ring) / S;
+              }
+          }
+          this.updateSpeedDisplay();
+      };
+
+      GearStage.prototype.updateSpeedDisplay = function() {
+          var els = ['sun', 'carrier', 'ring'];
+          var self = this;
+          els.forEach(function(type) {
+             var sl = document.getElementById(type + 'Speed_' + self.id);
+             var out = document.getElementById(type + 'SpeedOut_' + self.id);
+             
+             // If this element is the driven input, disable slider
+             if (self.id > 0 && self.coupling.inputTarget === type) {
+                 sl.disabled = true;
+                 sl.style.opacity = "0.5";
+             } else if (self.id === 0 && self.mode === type) {
+                 sl.disabled = true;
+                 sl.style.opacity = "0.5";
+             } else if (self.id > 0 && self.coupling.inputTarget !== 'carrier' && type === 'carrier') {
+                 // Carrier is output in driven mode usually
+                 sl.disabled = true;
+                 sl.style.opacity = "0.5";
+             } else if (self.id > 0 && self.coupling.inputTarget === 'carrier' && type === 'sun') {
+                 // Sun is output if Carrier is input
+                 sl.disabled = true;
+                 sl.style.opacity = "0.5";
+             } else {
+                 sl.disabled = false;
+                 sl.style.opacity = "1";
+             }
+             
+             // Don't update value of active slider being dragged to avoid jitter, 
+             // but here we just update all for correctness
+             if(document.activeElement !== sl) {
+                sl.value = self.speeds[type];
+             }
+             out.value = self.speeds[type].toFixed(3);
+          });
+      };
+
+      GearStage.prototype.update = function(dt) {
+          var inc = 2 * Math.PI / 1000 * dt;
+          
+          this.angles.sun += inc * this.speeds.sun;
+          this.angles.carrier += inc * this.speeds.carrier;
+          this.angles.ring += inc * this.speeds.ring;
+          
+          // Render Rotation
+          var S = this.S, P = this.P, R = this.R;
+          var sa = this.angles.sun * 180 / Math.PI;
+          var ca = this.angles.carrier * 180 / Math.PI;
+          var ra = this.angles.ring * 180 / Math.PI;
+          
+          this.gfx.sun.setAttribute("transform", "rotate(" + (sa - 90) + ")");
+          this.gfx.ring.setAttribute("transform", "rotate(" + (ra - 90 - (1-P%2)*180.0/R) + ")");
+          
+          var orbitRad = (S+P)*mm_per_tooth/(2*pi);
+          var carrierPoints = [];
+          
+          for(var i=0; i < this.gfx.planets.length; ++i) {
+              var posDeg = ca + 360*i/this.gfx.planets.length; // degrees
+              
+              // Calculate planet rotation
+              // Planet rotation relative to carrier
+              // wp = wr * R/P - wc * R/P + wc ?? 
+              // Visual Formula from original:
+              // planetAngle = R/P * (ringAngle - planetPosition) + 90 + 180/P;
+              // (using degrees here)
+              var pAngle = R/P * (ra - posDeg) + 90 + 180/P;
+              
+              this.gfx.planets[i].setAttribute("transform", "rotate(" + posDeg + ") translate(" + orbitRad + ") rotate(" + pAngle + ")");
+              
+              var rads = posDeg * Math.PI / 180;
+              carrierPoints.push([orbitRad * Math.cos(rads), orbitRad * Math.sin(rads)]);
+          }
+          
+          this.gfx.carrier.setAttribute("d", makeCarrierPath(carrierPoints, orbitRad));
+      };
+
+
+      /*
+       * MAIN SYSTEM MANAGER
+       */
+      var GearSystem = {
+          stages: [],
+          anim: null,
+          
+          init: function() {
+              this.anim = new Animation();
+              this.updateStageCount(1);
+              this.anim.start();
+          },
+          
+          updateStageCount: function(count) {
+              var container = document.getElementById("stages_wrapper");
+              
+              // Remove excess
+              while(this.stages.length > count) {
+                  container.removeChild(container.lastChild);
+                  this.stages.pop();
+              }
+              
+              // Add new
+              while(this.stages.length < count) {
+                  var div = document.createElement("div");
+                  div.className = "stage-container";
+                  container.appendChild(div);
+                  
+                  var prev = (this.stages.length > 0) ? this.stages[this.stages.length-1] : null;
+                  var stage = new GearStage(this.stages.length, div, prev);
+                  this.stages.push(stage);
+                  this.anim.addStage(stage);
+              }
+              this.recalcAllSpeeds();
+          },
+          
+          recalcAllSpeeds: function() {
+              for(var i=0; i<this.stages.length; i++) {
+                  this.stages[i].recalcSpeeds();
+              }
+          }
+      };
+
+      window.onload = function() {
+          window.gearSystem = GearSystem;
+          GearSystem.init();
+          
+          var stgSlider = document.getElementById("totalStages");
+          stgSlider.oninput = function() {
+             document.getElementById("totalStagesOut").value = this.value;
+             GearSystem.updateStageCount(parseInt(this.value));
+          };
+      };
+
+    </script>
+  </head>
+  <body>
+    <div style="text-align: center; margin: 0 auto; max-width: 800px;">
+        <h1>Multi-Stage Planetary Gear Simulator</h1>
+        
+        <div style="background: #eee; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+            <label for="totalStages" style="width: auto;">Number of Gear Stages:</label>
+            <input type="range" id="totalStages" min="1" max="4" step="1" value="1" style="width: 200px;">
+            <input type="number" id="totalStagesOut" value="1" readonly>
+        </div>
+
+        <div id="stages_wrapper">
+            </div>
+
+        <div style="margin-top: 30px; font-size: small; color: #777;">
+          <p>Requires an HTML 5-compliant browser</p>
+          <p>Original generation code adapted from <a href="http://jsbin.com/oresos/latest">http://jsbin.com/oresos/latest</a></p>
+        </div>
+    </div>
+  </body>
+</html>
